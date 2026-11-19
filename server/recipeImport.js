@@ -1,5 +1,4 @@
-import dns from 'node:dns/promises';
-import net from 'node:net';
+import { safeFetch, UrlError } from './safeFetch.js';
 import { CATEGORIES, guessCategory } from './tagger.js';
 import { parseRecipeText, looksLikeIngredient } from './textParse.js';
 import { youtubeId, fetchYouTubeVideo, cleanVideoTitle, recipeLinks } from './youtube.js';
@@ -12,42 +11,22 @@ export function httpError(status, message, code) {
 }
 
 // ---------------------------------------------------------------- safe fetching
-function isPrivateIp(ip) {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split('.').map(Number);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
-  const v6 = ip.toLowerCase();
-  if (v6.startsWith('::ffff:')) return isPrivateIp(v6.slice(7));
-  return v6 === '::1' || v6 === '::' || v6.startsWith('fc') || v6.startsWith('fd') || v6.startsWith('fe80');
-}
+// The SSRF guard (address checks pinned to the connection, port/scheme limits,
+// manual redirects, streamed body cap) lives in safeFetch.js.
+const PAGE_HEADERS = { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' };
+// One message for every network/upstream failure, so the importer can't be used to
+// probe which internal hosts/ports exist or what they answer. Details go to the log.
+const FETCH_FAILED = "Couldn't fetch that page. Use the Clip button from your browser, or paste the recipe text instead.";
 
-async function assertPublicUrl(raw) {
-  let url;
-  try { url = new URL(raw); } catch { throw httpError(400, 'That does not look like a valid URL.'); }
-  if (!['http:', 'https:'].includes(url.protocol)) throw httpError(400, 'Only http(s) links are supported.');
-  const { address } = await dns.lookup(url.hostname).catch(() => { throw httpError(400, `Could not find the site "${url.hostname}".`); });
-  if (isPrivateIp(address)) throw httpError(400, 'That address is not allowed.');
-  return url;
-}
-
-/** fetch() that re-checks every redirect hop so we never hit internal addresses. */
-async function safeFetch(raw, hops = 5) {
-  let url = await assertPublicUrl(raw);
-  for (let i = 0; i <= hops; i++) {
-    const res = await fetch(url, {
-      redirect: 'manual',
-      headers: { 'User-Agent': UA, Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
-      url = await assertPublicUrl(new URL(res.headers.get('location'), url).href);
-      continue;
-    }
-    return res;
+/** Fetch a page for import; returns { status, ok, url, headers, body } or throws an httpError. */
+async function fetchPage(rawUrl) {
+  try {
+    return await safeFetch(rawUrl, { headers: PAGE_HEADERS, maxBytes: MAX_HTML, timeoutMs: 15000, maxRedirects: 5 });
+  } catch (e) {
+    if (e instanceof UrlError) throw httpError(400, e.message);
+    console.error(`[import] fetch failed for ${rawUrl}:`, e?.message || e, e?.cause?.code || '');
+    throw httpError(502, FETCH_FAILED, 'blocked');
   }
-  throw httpError(502, 'Too many redirects.');
 }
 
 // ---------------------------------------------------------------- HTML helpers
@@ -276,19 +255,13 @@ async function importMealDb(id) {
 }
 
 // ---------------------------------------------------------------- web pages
-const BLOCKED_STATUSES = new Set([401, 402, 403, 406, 429, 451, 503]);
-
 async function importWebPage(rawUrl, { strict = false } = {}) {
-  let res;
-  try { res = await safeFetch(rawUrl); } catch (e) {
-    if (e.status) throw e;
-    throw httpError(502, "Couldn't reach that page. The site may be down or refusing automated requests.", 'blocked');
+  const res = await fetchPage(rawUrl);
+  if (!res.ok) {
+    console.error(`[import] ${res.url} answered HTTP ${res.status}`);
+    throw httpError(502, FETCH_FAILED, 'blocked');
   }
-  if (BLOCKED_STATUSES.has(res.status)) {
-    throw httpError(422, `This site blocks automatic imports (it answered ${res.status}). Use the Clip button from your browser, or paste the recipe text instead.`, 'blocked');
-  }
-  if (!res.ok) throw httpError(422, `The site responded with ${res.status}. Check the link is right.`);
-  const html = Buffer.from((await res.arrayBuffer()).slice(0, MAX_HTML)).toString('utf8');
+  const html = res.body.toString('utf8');
   const recipe = parseRecipeHtml(html, res.url || rawUrl, { strict });
   if (!recipe) {
     throw httpError(422, "Couldn't find a recipe on that page. Try the Clip button, or paste the recipe text.", 'blocked');
