@@ -90,7 +90,12 @@ export function registerMarkdownRoutes(app) {
     const origin = `${req.protocol}://${req.get('host')}`;
     const md = recipeMarkdown(e, { photoLinks: e.photos.map((p) => origin + p.url), absolutePhotos: true });
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="${slugify(e.name)}.md"`);
+    // Header values must be Latin-1, so names like 东坡肉 can't go in filename="…" as-is (Node threw a 500).
+    // Send an ASCII fallback plus the real name as RFC 5987 filename*, which browsers prefer.
+    const slug = slugify(e.name);
+    const asciiSlug = slug.normalize('NFKD').replace(/[^\x20-\x7e]/g, '').replace(/["\\]/g, '').replace(/^_+|_+$/g, '') || 'recipe';
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${asciiSlug}.md"; filename*=UTF-8''${encodeURIComponent(`${slug}.md`)}`);
     res.send(md);
   });
 

@@ -113,7 +113,11 @@ export const coverOf =(e) => e.photos?.[0]?.url || e.imageUrl || '';
  * `photoFiles` are upload filenames to duplicate into the copy.
  */
 export function createEntryCopy(userId, src, { notes = '', photoFiles = [] } = {}) {
-  const lastInsertRowid = insertEntry(userId, { ...src, notes, favorite: false, status: 'made', madeOn: null });
+  const lastInsertRowid = insertEntry(userId, {
+    ...src, notes, favorite: false, status: 'made', madeOn: null,
+    // A saved copy is new to this kitchen: don't inherit the source entry's timestamps.
+    createdAt: null, updatedAt: null,
+  });
   const insert = db.prepare('INSERT INTO photos (entry_id, filename) VALUES (?, ?)');
   for (const f of photoFiles) {
     const copy = duplicatePhotoFile(f);
