@@ -15,7 +15,10 @@ const CUISINES = new Set([
 // --- Known dishes, matched against the entry name -------------------------------------------
 const DISHES = [
   // Italian
-  [/bolognese|\brag[uù]\b/, ['Italian', 'Beef', 'Pork', 'Cheese', 'Pasta', 'Tomato']],
+  [/bolognese/, ['Italian', 'Beef', 'Pork', 'Cheese', 'Pasta', 'Tomato']],
+  [/\brag[uùú]\b/, ['Italian', 'Tomato']], // ragù can be any meat; the rest of the name decides
+  [/\bduck\b|confit de canard|peking duck/, ['Duck']],
+  [/\blamb\b|\bmutton\b/, ['Lamb']],
   [/carbonara/, ['Italian', 'Pork', 'Egg', 'Cheese', 'Pasta']],
   [/amatriciana/, ['Italian', 'Pork', 'Cheese', 'Pasta', 'Tomato']],
   [/cacio e pepe/, ['Italian', 'Cheese', 'Pasta']],
@@ -90,7 +93,7 @@ const DISHES = [
   // Main-ingredient hints from dish names
   [/\b(burgers?|meatloaf|pot roast|wellington|stroganoff|goulash|steak|brisket|chili con carne|meatballs?|beef)\b/, ['Beef']],
   [/\b(rogan josh|lamb|mutton)\b/, ['Lamb']],
-  [/pulled pork|bratwurst|bangers|toad in the hole|sisig|\bham\b|bacon|\bpork\b|sausages?/, ['Pork']],
+  [/pulled pork|bratwurst|bangers|toad in the hole|sisig|\bham\b|bacon|\bpork\b|sausages?|n['’]?duja|guanciale|pancetta|prosciutto|chorizo|mortadella|norcina|zozzona|lup cheong|char siu|siu yuk|dong ?po|卤肉|东坡/, ['Pork']],
   [/chicken|tandoori|coq au vin|\bjerk\b|buffalo wings?|satay/, ['Chicken']],
   [/\b(fish|salmon|tuna|cod|sushi|ceviche|bouillabaisse|otah|ni[cç]oise|sardines?|mackerel|trout|sea bass|snapper)\b/, ['Fish']],
   [/\b(prawns?|shrimps?|crabs?|lobster|scallops?|mussels?|clams?|squid|calamari|oysters?|seafood|clam chowder)\b/, ['Seafood']],
@@ -114,7 +117,7 @@ const DISHES = [
 // --- Ingredient-line patterns -------------------------------------------------------------
 const INGREDIENT_TAGS = [
   ['Beef', /\b(beef|steaks?|brisket|sirloin|rib-?eye|chuck|oxtail|veal|short ribs?)\b/],
-  ['Pork', /\b(pork|bacon|pancetta|guanciale|prosciutto|ham|chorizo|sausages?|salami|lardons?|pepperoni|char siu|spare ?ribs|lap cheong)\b/],
+  ['Pork', /\b(pork|bacon|pancetta|guanciale|prosciutto|ham|chorizo|sausages?|salami|lardons?|pepperoni|char siu|spare ?ribs|lap cheong|n['’]?duja|mortadella|speck)\b/],
   ['Chicken', /\bchicken\b(?! (stock|broth|bouillon|powder))/],
   ['Turkey', /\bturkey\b/],
   ['Duck', /\bduck\b/],
@@ -150,14 +153,16 @@ const CUISINE_HINTS = [
   ['French', /\b(gruy[eè]re|cr[eè]me fra[iî]che|dijon|herbes de provence|shallots?|tarragon|cognac)\b/g],
 ];
 
-const MEAT_TAGS = ['Beef', 'Pork', 'Chicken', 'Turkey', 'Duck', 'Lamb', 'Fish', 'Seafood'];
+export const MEAT_TAGS = ['Beef', 'Pork', 'Chicken', 'Turkey', 'Duck', 'Lamb', 'Fish', 'Seafood'];
+export const isCuisineTag = (t) => CUISINES.has(t);
 
 // --- Category guess ------------------------------------------------------------------------
+const DRINKS_RULE = ['Drinks', /smoothie|cocktail|latte|lemonade|\btea\b|coffee|milkshake|juice|mocktail|sangria|kombucha|bubble tea|boba|teh tarik|punch\b/];
 const CATEGORY_RULES = [
-  ['Drinks', /smoothie|cocktail|latte|lemonade|\btea\b|coffee|milkshake|juice|mocktail|sangria|kombucha|bubble tea|boba|teh tarik|punch\b/],
   ['Breakfast', /pancakes?|waffles?|omelet(te)?|granola|oatmeal|porridge|overnight oats|french toast|eggs benedict|scrambled eggs|breakfast|full english|huevos rancheros|kaya toast/],
   ['Baking', /cakes?\b|cookies?|brownies?|blondies?|muffins?|cupcakes?|bread|loaf|\bpie\b|\btart\b|tarts\b|scones?|croissants?|focaccia|brioche|baguette|sourdough|biscuits?|buns?\b|rolls?\b|pastry|pastries|macarons?|madeleines?|cinnamon rolls?|bagels?|pretzels?|shortbread|financiers?|galette|strudel|babka|banana bread|cheesecake|[eé]clairs?|danish|focaccia|swiss roll|chiffon|bake\b|baked goods/],
   ['Desserts', /ice cream|gelato|sorbet|pudding|mousse|tiramis[uù]|panna cotta|cr[eè]me br[uû]l[eé]e|custard|trifle|crumble|cobbler|parfait|dessert|fudge|truffles?|mochi|cendol|leche flan|sticky toffee|churros?|eton mess|pavlova|affogato|sweet soup|tong sui|jelly/],
+  DRINKS_RULE, // after baking/desserts so "coffee walnut cake" is a cake, not a drink
   ['Soups & Salads', /soup|stew|chowder|bisque|broth|salad|gazpacho|minestrone|borscht|congee|laksa|\bpho\b|ramen|tom yum|tom kha|slaw|coleslaw/],
   ['Snacks & Sides', /dip\b|hummus|guacamole|salsa|fries|chips|wings?\b|spring rolls?|dumplings?|samosas?|nachos|bruschetta|side\b|appetizer|snack|popcorn|crackers?|pickles?|kimchi|edamame|croquetas|arancini|curry puffs?|garlic bread|coleslaw|roasted vegetables|mashed potato/],
 ];

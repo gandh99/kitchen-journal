@@ -111,9 +111,9 @@ function renderTopbar(active) {
       ${link('#/', 'kitchen', 'My Kitchen')}
       ${link('#/spotlight', 'spotlight', '🌟 Spotlight')}
       ${link('#/cook', 'cook', 'What can I cook?')}
-      ${link('#/community', 'community', 'Community &amp; Sharing')}
+      ${link('#/community', 'community', 'Community')}
     </nav>
-    <div class="user-menu"><span>@${esc(state.user.username)}</span><button class="btn-sm btn-ghost" id="logout">Sign out</button></div>
+    <div class="user-menu"><a href="#/data" class="${active === 'data' ? 'active' : ''}" title="Import & export Markdown">⇅ Import / Export</a><span>@${esc(state.user.username)}</span><button class="btn-sm btn-ghost" id="logout">Sign out</button></div>
   </div>`;
   topbar.querySelector('#logout').addEventListener('click', async () => {
     await api('/auth/logout', { method: 'POST' }).catch(() => {});
@@ -124,10 +124,10 @@ function renderTopbar(active) {
 
 function entryCard(e, href) {
   return `<a class="entry-card" href="${href}">
-    <div class="cover">${coverImg(e)}</div>
+    <div class="cover">${coverImg(e)}${e.favorite ? '<span class="fav-badge" title="Favourite">⭐</span>' : ''}${e.status === 'wishlist' ? '<span class="wish-badge">📝 Want to try</span>' : ''}</div>
     <div class="body">
       <h3>${esc(e.name)}</h3>
-      <div class="meta">${esc(e.category)}${e.madeOn ? ` · made ${esc(fmtDate(e.madeOn))}` : ''}</div>
+      <div class="meta">${esc(e.category)}${e.madeOn && e.status !== 'wishlist' ? ` · made ${esc(fmtDate(e.madeOn))}` : ''}</div>
       <div class="tags">${e.tags.slice(0, 5).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
     </div>
   </a>`;
@@ -135,17 +135,22 @@ function entryCard(e, href) {
 
 /** Category tabs + grid; used by "My Kitchen" and shared collections. */
 function paintCollection({ tabsEl, resultsEl, entries, hrefFor, emptyHtml }) {
+  // Two filter tabs on top of the category tabs.
+  const SPECIAL = { '★': { label: '⭐ Favourites', test: (e) => e.favorite }, wishlist: { label: '📝 Want to try', test: (e) => e.status === 'wishlist' } };
   const counts = { All: entries.length };
   for (const e of entries) counts[e.category] = (counts[e.category] || 0) + 1;
+  for (const [k, s] of Object.entries(SPECIAL)) counts[k] = entries.filter(s.test).length;
   if (state.tab !== 'All' && !counts[state.tab]) state.tab = 'All';
-  const tabs = ['All', ...state.categories.filter((c) => counts[c])];
-  tabsEl.innerHTML = tabs.map((t) => `<button class="tab ${state.tab === t ? 'active' : ''}" data-tab="${esc(t)}">
-    ${t === 'All' ? 'All' : `${EMOJI[t] || ''} ${esc(t)}`} <span class="n">${counts[t] || 0}</span></button>`).join('');
+  const tabs = ['All', ...Object.keys(SPECIAL).filter((k) => counts[k]), ...state.categories.filter((c) => counts[c])];
+  tabsEl.innerHTML = tabs.map((t) => `<button class="tab ${state.tab === t ? 'active' : ''} ${SPECIAL[t] ? 'special' : ''}" data-tab="${esc(t)}">
+    ${t === 'All' ? 'All' : SPECIAL[t] ? SPECIAL[t].label : `${EMOJI[t] || ''} ${esc(t)}`} <span class="n">${counts[t] || 0}</span></button>`).join('');
   tabsEl.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => {
     state.tab = b.dataset.tab;
     paintCollection({ tabsEl, resultsEl, entries, hrefFor, emptyHtml });
   }));
-  const shown = state.tab === 'All' ? entries : entries.filter((e) => e.category === state.tab);
+  const shown = state.tab === 'All' ? entries
+    : SPECIAL[state.tab] ? entries.filter(SPECIAL[state.tab].test)
+      : entries.filter((e) => e.category === state.tab);
   resultsEl.innerHTML = shown.length
     ? `<div class="grid">${shown.map((e) => entryCard(e, hrefFor(e))).join('')}</div>`
     : emptyHtml;
@@ -178,6 +183,7 @@ async function router() {
       case 'new': return await renderEditor(null, alive, params);
       case 'entry': return parts[2] === 'edit' ? await renderEditor(parts[1], alive, params) : await renderEntry(parts[1], alive);
       case 'clip': return renderClip(alive);
+      case 'data': return renderData(alive);
       case 'spotlight':
         return parts[2] === 's' && parts[3]
           ? await renderSubmission(parts[1], parts[3], alive)
@@ -267,7 +273,7 @@ async function renderKitchen(params, alive) {
 }
 
 // ------------------------------------------------------------------ entry detail
-function entryDetailHtml(e, { back, actions = '', tagHref, banner = '' }) {
+function entryDetailHtml(e, { back, actions = '', tagHref, banner = '', favToggle = false }) {
   const video = youtubeId(e.recipeUrl);
   // With a video, the YouTube thumbnail would just duplicate the player.
   const images = [...e.photos.map((p) => p.url), ...(e.imageUrl && !video ? [e.imageUrl] : [])];
@@ -281,10 +287,11 @@ function entryDetailHtml(e, { back, actions = '', tagHref, banner = '' }) {
   <div class="stack">
     <div class="detail-head">
       <div>
-        <h1>${esc(e.name)}</h1>
+        <h1>${esc(e.name)}${favToggle === false && e.favorite ? ' <span title="Favourite">⭐</span>' : ''}</h1>
         <div class="row meta">
           <span class="tag plain">${EMOJI[e.category] || ''} ${esc(e.category)}</span>
-          ${e.madeOn ? `<span>Made ${esc(fmtDate(e.madeOn))}</span>` : ''}
+          ${e.status === 'wishlist' ? '<span class="tag gold">📝 Want to try</span>' : ''}
+          ${e.madeOn && e.status !== 'wishlist' ? `<span>Made ${esc(fmtDate(e.madeOn))}</span>` : ''}
           <span>Updated ${esc(fmtDate(e.updatedAt))}</span>
         </div>
       </div>
@@ -332,10 +339,24 @@ async function renderEntry(id, alive) {
   if (!alive()) return;
   app.innerHTML = entryDetailHtml(entry, {
     back: { href: '#/', label: 'My Kitchen' },
-    actions: `<button class="btn-ghost btn-danger" id="del">Delete</button><a class="btn btn-primary" href="#/entry/${entry.id}/edit">✎ Edit</a>`,
+    actions: `<button class="fav-toggle ${entry.favorite ? 'on' : ''}" id="fav" aria-pressed="${entry.favorite}" title="Favourite">${entry.favorite ? '⭐ Favourite' : '☆ Favourite'}</button>
+      <a class="btn btn-ghost" href="/api/entries/${entry.id}/markdown" download title="Download this recipe as a Markdown file">⬇ .md</a>
+      <button class="btn-ghost btn-danger" id="del">Delete</button><a class="btn btn-primary" href="#/entry/${entry.id}/edit">✎ Edit</a>`,
     tagHref: (t) => `#/?q=${enc(t)}`,
+    favToggle: true,
   });
   wireGallery();
+  const favBtn = app.querySelector('#fav');
+  favBtn.addEventListener('click', async () => {
+    const next = !entry.favorite;
+    try {
+      await api(`/entries/${entry.id}/favorite`, { method: 'PATCH', body: { favorite: next } });
+      entry.favorite = next;
+      favBtn.classList.toggle('on', next);
+      favBtn.setAttribute('aria-pressed', next);
+      favBtn.textContent = next ? '⭐ Favourite' : '☆ Favourite';
+    } catch (e) { toast(e.message, 'error'); }
+  });
   app.querySelector('#del').addEventListener('click', async () => {
     if (!confirm(`Delete “${entry.name}”? Its photos will be removed too. This can't be undone.`)) return;
     try { await api(`/entries/${entry.id}`, { method: 'DELETE' }); toast('Entry deleted'); location.hash = '#/'; }
@@ -433,6 +454,13 @@ async function renderEditor(id, alive, params = new URLSearchParams()) {
         <label class="field" style="flex:1"><span>Category</span>
           <select name="category">${state.categories.map((c) => `<option ${c === (entry?.category || 'Mains') ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
         <label class="field" style="flex:1"><span>Date made</span><input type="date" name="madeOn" value="${esc(entry?.madeOn || '')}"></label>
+      </div>
+      <div class="row full" style="gap:18px">
+        <div class="seg" role="radiogroup" aria-label="Status">
+          <label><input type="radio" name="status" value="made" ${entry?.status !== 'wishlist' ? 'checked' : ''}><span>🍳 Made it</span></label>
+          <label><input type="radio" name="status" value="wishlist" ${entry?.status === 'wishlist' ? 'checked' : ''}><span>📝 Want to try</span></label>
+        </div>
+        <label class="check"><input type="checkbox" name="favorite" ${entry?.favorite ? 'checked' : ''}> ⭐ Favourite</label>
       </div>
       <div class="field full">
         <span style="display:block;font-weight:600;font-size:.88rem;margin-bottom:6px">Tags <span class="muted" style="font-weight:400">· suggested automatically, click × to remove, type to add</span></span>
@@ -604,6 +632,7 @@ async function renderEditor(id, alive, params = new URLSearchParams()) {
     if (tagInput?.value.trim()) { ed.added.push(tagInput.value.trim()); tagInput.value = ''; }
     const body = {
       name: form.name.value, category: form.category.value, madeOn: form.madeOn.value,
+      status: form.status.value, favorite: form.favorite.checked,
       recipeUrl: form.recipeUrl.value.trim(), imageUrl: ed.imageUrl,
       ingredients: lines(), instructions: form.instructions.value, notes: form.notes.value, tags: currentTags(),
     };
@@ -857,6 +886,270 @@ async function renderSharedEntry(token, id, alive) {
       location.hash = `#/entry/${newId}`;
     } catch (err) { toast(err.message, 'error'); }
   }));
+}
+
+// ------------------------------------------------------------------ import & export (Markdown)
+const IMAGE_FILE = /\.(jpe?g|png|webp|gif|avif)$/i;
+const fmtNum = (n) => Number(n).toLocaleString();
+
+function renderData(alive) {
+  renderTopbar('data');
+  app.innerHTML = `<div class="stack">
+    <div><h1>Import &amp; export</h1>
+      <p class="muted" style="margin:0">Your kitchen as plain Markdown files you can read, edit, back up or put in git, and bring back in any time.</p></div>
+
+    <section class="card stack">
+      <div class="row spread" style="align-items:flex-start">
+        <div style="flex:1;min-width:260px">
+          <h2 style="margin:0">⬇ Export</h2>
+          <p class="muted" style="margin:6px 0 0">Downloads a <strong>.zip</strong> of your whole kitchen: journals, one file per recipe, category lists and photos.</p>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="exp-photos" checked> Include photos</label>
+          <a class="btn btn-primary" id="exp-go" href="/api/export/markdown" download>⬇ Download .zip</a>
+        </div>
+      </div>
+      <details><summary class="muted">What's inside</summary>
+<pre class="tree">kitchen-journal/
+├── README.md            overview and conventions
+├── main.md              # Food Journey: savoury dishes you've made, plus your wishlist
+├── dessert.md           # Food Journey: baking and desserts
+├── Categories/          by category, cuisine, main ingredient, tag and favourites
+├── Recipes/             one .md per dish: ingredients, method and notes
+│   └── pasta_alla_bolognese.md
+└── Pictures/            one folder per dish
+    └── Pasta alla Bolognese/01.jpg</pre>
+        <p class="hint">Journals use <code>- [*] Dish</code> for favourites and <code>[*] link</code> for the source you used. Each recipe file starts with a small <code>---</code> block of fields, so re-importing an export loses nothing.</p>
+      </details>
+    </section>
+
+    <section class="card stack" id="imp">
+      <div>
+        <h2 style="margin:0">⬆ Import</h2>
+        <p class="muted" style="margin:6px 0 0">Bring in Markdown notes: a whole notes folder (with a <code>Pictures/</code> folder if you have one), individual <code>.md</code> files, or a Kitchen Journal export <code>.zip</code>. You'll see a preview before anything is saved.</p>
+      </div>
+      <div class="drop-area" id="imp-drop">
+        <div class="row" style="justify-content:center">
+          <button class="btn-primary" id="pick-folder">📁 Choose a folder</button>
+          <button id="pick-files">📄 Choose .md or .zip files</button>
+        </div>
+        <p class="hint center" style="margin:10px 0 0">…or drop .md / .zip files here</p>
+        <input type="file" id="in-folder" webkitdirectory multiple hidden>
+        <input type="file" id="in-files" accept=".md,.markdown,.zip,text/markdown,application/zip" multiple hidden>
+      </div>
+      <div class="row">
+        <label class="field" style="max-width:220px"><span>Photos per dish</span>
+          <select id="imp-max"><option value="6">Up to 6</option><option value="12" selected>Up to 12</option><option value="24">Up to 24</option><option value="0">All of them</option></select></label>
+        <p class="hint" style="margin:18px 0 0;flex:1;min-width:220px">Photos are matched to dishes by folder name (<code>Pictures/&lt;Dish&gt;/…</code>). When a dish has more photos than this, an even spread across every time you made it is kept. Large photos are resized before uploading.</p>
+      </div>
+      <div id="imp-out"></div>
+    </section>
+  </div>`;
+
+  // ---- export
+  const expPhotos = app.querySelector('#exp-photos');
+  const expGo = app.querySelector('#exp-go');
+  expPhotos.addEventListener('change', () => { expGo.href = `/api/export/markdown${expPhotos.checked ? '' : '?photos=0'}`; });
+
+  // ---- import
+  const out = app.querySelector('#imp-out');
+  const maxSel = app.querySelector('#imp-max');
+  let picked = null; // { md: [{path, file}], images: Map(path -> File), zip: File|null, label }
+
+  const choose = (fileList) => {
+    const all = [...fileList].filter((f) => !/(^|\/)\.git\//.test(f.webkitRelativePath || ''));
+    const zip = all.find((f) => /\.zip$/i.test(f.name));
+    const pathOf = (f) => f.webkitRelativePath || f.name;
+    picked = {
+      zip: zip || null,
+      md: zip ? [] : all.filter((f) => /\.(md|markdown)$/i.test(f.name)).map((f) => ({ path: pathOf(f), file: f })),
+      images: zip ? new Map() : new Map(all.filter((f) => IMAGE_FILE.test(f.name)).map((f) => [pathOf(f), f])),
+    };
+    parse();
+  };
+  app.querySelector('#pick-folder').addEventListener('click', () => app.querySelector('#in-folder').click());
+  app.querySelector('#pick-files').addEventListener('click', () => app.querySelector('#in-files').click());
+  app.querySelector('#in-folder').addEventListener('change', (e) => { choose(e.target.files); e.target.value = ''; });
+  app.querySelector('#in-files').addEventListener('change', (e) => { choose(e.target.files); e.target.value = ''; });
+  const drop = app.querySelector('#imp-drop');
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('drag'); choose(e.dataTransfer.files); });
+  maxSel.addEventListener('change', () => { if (picked) parse(); });
+
+  async function parse() {
+    if (!picked.zip && !picked.md.length) { toast('No .md or .zip files in what you picked', 'error'); return; }
+    out.innerHTML = `<p class="muted center pad"><span class="spinner"></span> Reading ${picked.zip ? esc(picked.zip.name) : `${fmtNum(picked.md.length)} Markdown file${picked.md.length === 1 ? '' : 's'}${picked.images.size ? ` and ${fmtNum(picked.images.size)} photos` : ''}`}…</p>`;
+    try {
+      let result;
+      if (picked.zip) {
+        const fd = new FormData();
+        fd.append('maxPhotos', maxSel.value);
+        fd.append('archive', picked.zip);
+        result = await api('/markdown/parse', { method: 'POST', form: fd });
+      } else {
+        const files = await Promise.all(picked.md.map(async ({ path, file }) => ({ path, text: await file.text() })));
+        result = await api('/markdown/parse', { method: 'POST', body: { files, imagePaths: [...picked.images.keys()], maxPhotos: Number(maxSel.value) } });
+      }
+      if (alive()) showPreview(result);
+    } catch (e) { out.innerHTML = ''; toast(e.message, 'error'); }
+  }
+
+  function showPreview({ importId, items, skipped, stats }) {
+    // Default: import everything except things already in the kitchen and photo-only twins.
+    const sel = new Set(items.filter((i) => !i.duplicateOf && !(i.origin === 'photos' && i.duplicateInImport)).map((i) => i.key));
+    let filter = '';
+    let view = 'all';
+    const n = (f) => items.filter(f).length;
+    out.innerHTML = `<div class="stack">
+      <div class="banner">
+        <strong>Found ${fmtNum(items.length)} dishes</strong> in ${fmtNum(stats.markdownFiles)} Markdown file${stats.markdownFiles === 1 ? '' : 's'}${stats.images ? ` and ${fmtNum(stats.images)} photos` : ''}.
+        <div class="tags" style="margin-top:8px">
+          <span class="tag plain">🍳 ${n((i) => i.status === 'made')} made</span>
+          <span class="tag plain">📝 ${n((i) => i.status === 'wishlist')} want to try</span>
+          <span class="tag plain">⭐ ${n((i) => i.favorite)} favourites</span>
+          <span class="tag plain">📷 ${n((i) => i.photos.length)} with photos</span>
+          <span class="tag plain">🥕 ${n((i) => i.ingredients.length)} with ingredients</span>
+          ${n((i) => i.duplicateOf) ? `<span class="tag gold">${n((i) => i.duplicateOf)} already in your kitchen (unticked)</span>` : ''}
+        </div>
+      </div>
+      ${skipped.length ? `<details><summary class="muted">${skipped.length} file/section${skipped.length === 1 ? '' : 's'} skipped</summary><ul class="hint">${skipped.map((s) => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}
+      <div class="row spread">
+        <div class="row">
+          <input type="search" id="pv-q" placeholder="Filter dishes…" style="width:240px">
+          <select id="pv-view" style="width:200px">
+            <option value="all">Show all</option><option value="selected">Selected</option><option value="unselected">Not selected</option>
+            <option value="dup">Duplicates</option><option value="loose">Loose photo matches</option><option value="photos">Photos only</option>
+          </select>
+        </div>
+        <div class="row"><button class="btn-sm" id="pv-all">Select all</button><button class="btn-sm btn-ghost" id="pv-none">Select none</button></div>
+      </div>
+      <div class="pv-list" id="pv-list"></div>
+      <div class="sticky-actions row spread">
+        <span class="muted" id="pv-count"></span>
+        <button class="btn-primary" id="pv-go">Import</button>
+      </div>
+    </div>`;
+    const list = out.querySelector('#pv-list');
+    const visible = () => items.filter((i) => (!filter || i.name.toLowerCase().includes(filter))
+      && (view === 'all' || (view === 'selected' && sel.has(i.key)) || (view === 'unselected' && !sel.has(i.key))
+        || (view === 'dup' && (i.duplicateOf || i.duplicateInImport)) || (view === 'loose' && i.photoFolder) || (view === 'photos' && i.origin === 'photos')));
+    const countLine = () => {
+      const chosen = items.filter((i) => sel.has(i.key));
+      const photos = chosen.reduce((s, i) => s + i.photos.length, 0);
+      out.querySelector('#pv-count').textContent = `${fmtNum(chosen.length)} of ${fmtNum(items.length)} selected · ${fmtNum(photos)} photos`;
+      out.querySelector('#pv-go').textContent = `Import ${fmtNum(chosen.length)} ${chosen.length === 1 ? 'entry' : 'entries'}`;
+      out.querySelector('#pv-go').disabled = !chosen.length;
+    };
+    const row = (i) => `<details class="pv-row ${sel.has(i.key) ? '' : 'off'}" data-key="${i.key}">
+      <summary>
+        <input type="checkbox" data-sel="${i.key}" ${sel.has(i.key) ? 'checked' : ''} aria-label="Import ${esc(i.name)}">
+        <span class="pv-name">${i.favorite ? '⭐ ' : ''}${esc(i.name)}</span>
+        <select data-cat="${i.key}" aria-label="Category">${state.categories.map((c) => `<option ${c === i.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+        <button type="button" class="pv-status ${i.status}" data-status="${i.key}" title="Click to switch">${i.status === 'wishlist' ? '📝 Want to try' : '🍳 Made'}</button>
+        <span class="pv-meta">${i.photos.length ? `📷 ${i.photos.length}${i.photoTotal > i.photos.length ? `/${i.photoTotal}` : ''}` : ''}${i.ingredients.length ? ` · 🥕 ${i.ingredients.length}` : ''}${i.instructions ? ' · 📋' : ''}${i.recipeUrl ? ' · 🔗' : ''}</span>
+      </summary>
+      <div class="pv-body">
+        ${i.duplicateOf ? `<p class="warn">Already in your kitchen as “${esc(i.duplicateOf.name)}”. Unticked so you don't get two.</p>` : ''}
+        ${i.duplicateInImport ? `<p class="warn">Another dish in this import is also called “${esc(i.duplicateInImport)}”.</p>` : ''}
+        ${i.photoFolder ? `<p class="warn">Photos matched loosely from the folder “${esc(i.photoFolder)}”.</p>` : ''}
+        <div class="tags">${i.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div>
+        <p class="hint" style="margin:6px 0">From ${esc(i.source)}${i.madeOn ? ` · last made ${esc(fmtDate(i.madeOn))}` : ''}${i.recipeUrl ? ` · <a href="${esc(i.recipeUrl)}" target="_blank" rel="noopener noreferrer">${esc(i.recipeUrl)}</a>` : ''}</p>
+        ${i.ingredients.length ? `<p class="pv-sub">Ingredients</p><p class="pv-text">${esc(i.ingredients.slice(0, 12).join(' · '))}${i.ingredients.length > 12 ? ' …' : ''}</p>` : ''}
+        ${i.instructions ? `<p class="pv-sub">Method</p><p class="pv-text">${esc(i.instructions.split('\n').slice(0, 3).join(' / '))}${i.instructions.split('\n').length > 3 ? ' …' : ''}</p>` : ''}
+        ${i.notes ? `<p class="pv-sub">Notes</p><pre class="pv-notes">${esc(i.notes.length > 900 ? i.notes.slice(0, 900) + '\n…' : i.notes)}</pre>` : ''}
+      </div>
+    </details>`;
+    const paint = () => {
+      const v = visible();
+      list.innerHTML = v.length ? v.map(row).join('') : '<p class="muted center pad">No dishes match.</p>';
+      countLine();
+    };
+    list.addEventListener('click', (e) => {
+      if (e.target.matches('[data-sel], [data-cat], [data-status]')) e.stopPropagation();
+      const st = e.target.closest('[data-status]');
+      if (st) {
+        e.preventDefault();
+        const it = items.find((x) => x.key === st.dataset.status);
+        it.status = it.status === 'wishlist' ? 'made' : 'wishlist';
+        st.className = `pv-status ${it.status}`;
+        st.textContent = it.status === 'wishlist' ? '📝 Want to try' : '🍳 Made';
+      }
+      if (e.target.matches('[data-sel]') || e.target.matches('[data-cat]')) {
+        // Don't let clicks on controls inside <summary> toggle the row open.
+        if (e.target.matches('[data-cat]')) e.preventDefault();
+      }
+    });
+    list.addEventListener('change', (e) => {
+      const k = e.target.dataset.sel || e.target.dataset.cat;
+      if (e.target.dataset.sel) {
+        if (e.target.checked) sel.add(k); else sel.delete(k);
+        e.target.closest('.pv-row').classList.toggle('off', !e.target.checked);
+        countLine();
+      } else if (e.target.dataset.cat) {
+        items.find((x) => x.key === k).category = e.target.value;
+      }
+    });
+    out.querySelector('#pv-q').addEventListener('input', debounce((e) => { filter = e.target.value.trim().toLowerCase(); paint(); }, 150));
+    out.querySelector('#pv-view').addEventListener('change', (e) => { view = e.target.value; paint(); });
+    out.querySelector('#pv-all').addEventListener('click', () => { visible().forEach((i) => sel.add(i.key)); paint(); });
+    out.querySelector('#pv-none').addEventListener('click', () => { visible().forEach((i) => sel.delete(i.key)); paint(); });
+    out.querySelector('#pv-go').addEventListener('click', () => runImport(importId, items.filter((i) => sel.has(i.key))));
+    paint();
+  }
+
+  async function runImport(importId, chosen) {
+    out.innerHTML = `<div class="banner stack"><strong id="pr-title"><span class="spinner"></span> Saving ${fmtNum(chosen.length)} entries…</strong>
+      <div class="progress"><i id="pr-bar" style="width:5%"></i></div><span class="hint" id="pr-text"></span></div>`;
+    const bar = out.querySelector('#pr-bar');
+    const text = out.querySelector('#pr-text');
+    let res;
+    try {
+      res = await api('/markdown/import', { method: 'POST', body: { importId, items: chosen } });
+    } catch (e) { out.innerHTML = ''; toast(e.message, 'error'); return; }
+
+    // Folder imports: upload each entry's photos from the browser (resized first).
+    const byKey = new Map(chosen.map((i) => [i.key, i]));
+    const jobs = [];
+    if (!importId) {
+      for (const c of res.created) {
+        const files = (byKey.get(c.key)?.photos || []).map((p) => picked.images.get(p)).filter(Boolean);
+        for (let i = 0; i < files.length; i += 6) jobs.push({ id: c.id, files: files.slice(i, i + 6) });
+      }
+    }
+    const total = jobs.reduce((s, j) => s + j.files.length, 0);
+    let done = 0;
+    let failed = 0;
+    const tick = () => {
+      bar.style.width = `${total ? Math.round((done / total) * 100) : 100}%`;
+      text.textContent = total ? `Uploading photos… ${fmtNum(done)} / ${fmtNum(total)}` : '';
+    };
+    tick();
+    if (total) out.querySelector('#pr-title').innerHTML = `<span class="spinner"></span> Saved ${fmtNum(res.created.length)} entries, now adding photos`;
+    const worker = async () => {
+      while (jobs.length) {
+        const job = jobs.shift();
+        try {
+          const fd = new FormData();
+          for (const f of job.files) fd.append('photos', await shrinkImage(f));
+          await api(`/entries/${job.id}/photos`, { method: 'POST', form: fd });
+        } catch { failed += job.files.length; }
+        done += job.files.length;
+        tick();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    if (!alive()) return;
+    const photoCount = importId ? res.photosSaved : total - failed;
+    out.innerHTML = `<div class="banner stack">
+      <strong>✅ Imported ${fmtNum(res.created.length)} ${res.created.length === 1 ? 'entry' : 'entries'}${photoCount ? ` with ${fmtNum(photoCount)} photos` : ''}.</strong>
+      ${failed ? `<span class="warn">${fmtNum(failed)} photos couldn't be uploaded.</span>` : ''}
+      ${res.errors.length ? `<details><summary class="warn">${res.errors.length} couldn't be imported</summary><ul class="hint">${res.errors.map((e) => `<li>${esc(e.name || e.key)}: ${esc(e.error)}</li>`).join('')}</ul></details>` : ''}
+      <div class="row"><a class="btn btn-primary" href="#/">Go to My Kitchen</a></div>
+    </div>`;
+    state.tab = 'All';
+    state.query = '';
+  }
 }
 
 // ------------------------------------------------------------------ clip (bookmarklet receiver)

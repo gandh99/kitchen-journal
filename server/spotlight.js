@@ -56,6 +56,7 @@ function pickEntry(week) {
     SELECT e.*, (SELECT COUNT(*) FROM photos p WHERE p.entry_id = e.id) AS nphotos
     FROM entries e JOIN users u ON u.id = e.user_id
     WHERE u.share_enabled = 1
+      AND e.status = 'made'
       AND e.id NOT IN (SELECT entry_id FROM spotlights WHERE entry_id IS NOT NULL)`).all()
     .filter((r) => !usedNames.has(r.name.toLowerCase().trim()));
   if (!rows.length) return null;

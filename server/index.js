@@ -14,8 +14,9 @@ import { CATEGORIES, suggestTags, guessCategory, titleCase } from './tagger.js';
 import { importRecipe, importFromHtml, importFromText } from './recipeImport.js';
 import { normalizeItems, rankMyEntries, searchOnline } from './suggest.js';
 import {
-  fail, photoUrl, photosFor, toEntry, withPhotos, removePhotoFile, createEntryCopy,
+  fail, photoUrl, photosFor, toEntry, withPhotos, removePhotoFile, createEntryCopy, cleanEntry, insertEntry,
 } from './entries.js';
+import { registerMarkdownRoutes } from './markdownRoutes.js';
 import { registerSpotlightRoutes, entrySpotlightInfo } from './spotlight.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -24,10 +25,14 @@ const PORT = Number(process.env.PORT) || 3000;
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 'loopback');
-// Clipped pages carry the whole HTML document, so that one route gets a bigger limit.
+// Clipped pages and Markdown imports carry whole documents, so those routes get bigger limits.
 const jsonSmall = express.json({ limit: '1mb' });
 const jsonLarge = express.json({ limit: '8mb' });
-app.use((req, res, next) => (req.path === '/api/import/html' ? jsonLarge : jsonSmall)(req, res, next));
+const jsonHuge = express.json({ limit: '40mb' });
+app.use((req, res, next) => {
+  const parser = req.path.startsWith('/api/markdown/') ? jsonHuge : req.path === '/api/import/html' ? jsonLarge : jsonSmall;
+  parser(req, res, next);
+});
 app.use(loadUser);
 app.use((_req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
@@ -45,38 +50,6 @@ function getOwnedEntry(userId, id) {
   return row;
 }
 
-const isHttpUrl = (s) => { try { return ['http:', 'https:'].includes(new URL(s).protocol); } catch { return false; } };
-
-function cleanEntry(body = {}) {
-  const name = String(body.name ?? '').trim().slice(0, 200);
-  if (!name) throw fail(400, 'Please give the dish a name.');
-
-  let ingredients = body.ingredients ?? [];
-  if (typeof ingredients === 'string') ingredients = ingredients.split('\n');
-  if (!Array.isArray(ingredients)) ingredients = [];
-  ingredients = ingredients.map((s) => String(s).trim().slice(0, 300)).filter(Boolean).slice(0, 200);
-
-  const recipeUrl = String(body.recipeUrl ?? '').trim();
-  if (recipeUrl && (!isHttpUrl(recipeUrl) || recipeUrl.length > 2000)) throw fail(400, 'Recipe link must be a valid http(s) URL.');
-  const imageUrl = String(body.imageUrl ?? '').trim();
-
-  let tags = Array.isArray(body.tags) ? body.tags : [];
-  const seen = new Set();
-  tags = tags.map((t) => titleCase(String(t).trim()).slice(0, 40))
-    .filter((t) => t && !seen.has(t.toLowerCase()) && seen.add(t.toLowerCase())).slice(0, 30);
-  if (!tags.length) tags = suggestTags({ name, ingredients });
-
-  const category = CATEGORIES.includes(body.category) ? body.category : guessCategory(name, ingredients);
-  const madeOn = /^\d{4}-\d{2}-\d{2}$/.test(body.madeOn ?? '') ? body.madeOn : null;
-
-  return {
-    name, category, ingredients, tags, madeOn,
-    recipeUrl: recipeUrl || null,
-    imageUrl: imageUrl && isHttpUrl(imageUrl) && imageUrl.length <= 2000 ? imageUrl : null,
-    instructions: String(body.instructions ?? '').slice(0, 20000),
-    notes: String(body.notes ?? '').slice(0, 10000),
-  };
-}
 
 // ============================================================ uploads
 const ALLOWED_IMAGE = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'image/avif': '.avif' };
@@ -144,23 +117,24 @@ app.get('/api/entries/:id', requireAuth, (req, res) => {
 });
 
 app.post('/api/entries', requireAuth, (req, res) => {
-  const e = cleanEntry(req.body);
-  const { lastInsertRowid } = db.prepare(`INSERT INTO entries
-    (user_id, name, category, recipe_url, image_url, ingredients, instructions, notes, tags, made_on)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-    req.user.id, e.name, e.category, e.recipeUrl, e.imageUrl, JSON.stringify(e.ingredients),
-    e.instructions, e.notes, JSON.stringify(e.tags), e.madeOn);
-  const row = db.prepare('SELECT * FROM entries WHERE id = ?').get(lastInsertRowid);
+  const id = insertEntry(req.user.id, cleanEntry(req.body));
+  const row = db.prepare('SELECT * FROM entries WHERE id = ?').get(id);
   res.status(201).json({ entry: toEntry(row, []) });
+});
+
+app.patch('/api/entries/:id/favorite', requireAuth, (req, res) => {
+  const existing = getOwnedEntry(req.user.id, req.params.id);
+  db.prepare('UPDATE entries SET favorite = ? WHERE id = ?').run(req.body.favorite ? 1 : 0, existing.id);
+  res.json({ favorite: !!req.body.favorite });
 });
 
 app.put('/api/entries/:id', requireAuth, (req, res) => {
   const existing = getOwnedEntry(req.user.id, req.params.id);
   const e = cleanEntry(req.body);
   db.prepare(`UPDATE entries SET name = ?, category = ?, recipe_url = ?, image_url = ?, ingredients = ?,
-    instructions = ?, notes = ?, tags = ?, made_on = ?, updated_at = datetime('now') WHERE id = ?`).run(
+    instructions = ?, notes = ?, tags = ?, made_on = ?, favorite = ?, status = ?, updated_at = datetime('now') WHERE id = ?`).run(
     e.name, e.category, e.recipeUrl, e.imageUrl, JSON.stringify(e.ingredients),
-    e.instructions, e.notes, JSON.stringify(e.tags), e.madeOn, existing.id);
+    e.instructions, e.notes, JSON.stringify(e.tags), e.madeOn, e.favorite ? 1 : 0, e.status, existing.id);
   const row = db.prepare('SELECT * FROM entries WHERE id = ?').get(existing.id);
   res.json({ entry: withPhotos([row])[0] });
 });
@@ -292,6 +266,7 @@ app.post('/api/shared/:token/entries/:id/save', requireAuth, (req, res) => {
 });
 
 registerSpotlightRoutes(app);
+registerMarkdownRoutes(app);
 
 // Logged-in users can browse everyone who has turned sharing on.
 app.get('/api/community', requireAuth, (req, res) => {

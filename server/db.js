@@ -75,5 +75,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_sub_entry ON spotlight_submissions(entry_id);
 `);
 
+// ---- migrations for databases created by earlier versions
+const entryCols = new Set(db.prepare('PRAGMA table_info(entries)').all().map((c) => c.name));
+if (!entryCols.has('favorite')) db.exec('ALTER TABLE entries ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0');
+// 'made' = cooked it; 'wishlist' = want to try
+if (!entryCols.has('status')) db.exec("ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'made'");
+
 // Clear out expired sessions on boot.
 db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
