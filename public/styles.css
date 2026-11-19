@@ -37,6 +37,7 @@ img { max-width: 100%; display: block; }
 .spread { justify-content: space-between; }
 .stack > * + * { margin-top: 16px; }
 .hidden { display: none !important; }
+[hidden] { display: none !important; }
 
 /* ---------- top bar ---------- */
 .topbar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 88%, transparent);

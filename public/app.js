@@ -171,7 +171,8 @@ async function router() {
   window.scrollTo(0, 0);
   try {
     if (parts[0] === 's' && parts[1]) {
-      return parts[2] ? await renderSharedEntry(parts[1], parts[2], alive) : await renderShared(parts[1], params, alive);
+      const src = sharedSource('s', parts[1]);
+      return parts[2] ? await renderSharedEntry(src, parts[2], alive) : await renderShared(src, params, alive);
     }
     if (!state.user) {
       if (!['login', 'register'].includes(parts[0])) { state.afterLogin = location.hash; location.hash = '#/login'; return; }
@@ -190,6 +191,11 @@ async function router() {
           : await renderSpotlight(parts[1], alive);
       case 'cook': return renderCook();
       case 'community': return await renderCommunity(alive);
+      case 'c': {
+        if (!parts[1]) { location.hash = '#/community'; return; }
+        const src = sharedSource('c', parts[1]);
+        return parts[2] ? await renderSharedEntry(src, parts[2], alive) : await renderShared(src, params, alive);
+      }
       default: location.hash = '#/';
     }
   } catch (err) {
@@ -783,6 +789,11 @@ async function renderCommunity(alive) {
         <label class="switch"><input type="checkbox" id="share-toggle" ${share.enabled ? 'checked' : ''}> <span id="share-state">${share.enabled ? 'Sharing on' : 'Private'}</span></label>
       </div>
       <div id="share-box"></div>
+      <div class="row spread" id="spot-row" ${share.enabled ? '' : 'hidden'}>
+        <div><h3 style="margin:0">🌟 Weekly Spotlight</h3>
+          <p class="muted" style="margin:4px 0 0">Let one of your recipes be featured to everyone signed in, with your username and photos. Turning this (or sharing) off removes your recipes from past and current Spotlights.</p></div>
+        <label class="switch"><input type="checkbox" id="spot-toggle" ${share.spotlight ? 'checked' : ''}> <span id="spot-state">${share.spotlight ? 'Opted in' : 'Not featured'}</span></label>
+      </div>
     </div>
     <h2>Shared kitchens</h2>
     <div id="collections"></div>
@@ -790,6 +801,9 @@ async function renderCommunity(alive) {
 
   function paintShare(s) {
     app.querySelector('#share-state').textContent = s.enabled ? 'Sharing on' : 'Private';
+    app.querySelector('#spot-row').hidden = !s.enabled;
+    app.querySelector('#spot-toggle').checked = !!s.spotlight;
+    app.querySelector('#spot-state').textContent = s.spotlight ? 'Opted in' : 'Not featured';
     app.querySelector('#share-box').innerHTML = s.enabled ? `
       <div class="share-link"><input type="text" readonly value="${esc(shareUrl(s.token))}" id="share-url">
         <button class="btn-primary" id="copy">Copy link</button></div>
@@ -810,7 +824,7 @@ async function renderCommunity(alive) {
   }
   function paintCollections(list) {
     const el = app.querySelector('#collections');
-    el.innerHTML = list.length ? `<div class="grid">${list.map((c) => `<a class="entry-card collection" href="#/s/${esc(c.token)}">
+    el.innerHTML = list.length ? `<div class="grid">${list.map((c) => `<a class="entry-card collection" href="#/c/${esc(enc(c.publicId))}">
         <div class="collage">${c.covers.length ? c.covers.map((src) => `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-fallback="🍽️">`).join('') : '<div class="ph">🍳</div>'}</div>
         <div class="body" style="padding:0 14px 14px">
           <h3>${esc(c.username)}'s kitchen ${c.isMe ? '<span class="tag plain">you</span>' : ''}</h3>
@@ -827,12 +841,25 @@ async function renderCommunity(alive) {
     try { paintShare(await api('/share', { method: 'POST', body: { enabled: e.target.checked } })); loadCollections(); }
     catch (err) { e.target.checked = !e.target.checked; toast(err.message, 'error'); }
   });
+  app.querySelector('#spot-toggle').addEventListener('change', async (e) => {
+    if (!e.target.checked && !confirm('Stop being featured? Any Spotlight showing one of your recipes, and its cook-alongs, will be removed.')) {
+      e.target.checked = true; return;
+    }
+    try { paintShare(await api('/share', { method: 'POST', body: { enabled: true, spotlight: e.target.checked } })); }
+    catch (err) { e.target.checked = !e.target.checked; toast(err.message, 'error'); }
+  });
 }
 
-// Public shared collection (works without an account).
-async function renderShared(token, params, alive) {
+function sharedSource(kind, id) {
+  return kind === 'c'
+    ? { api: `/community/${enc(id)}`, href: `#/c/${enc(id)}` }
+    : { api: `/shared/${enc(id)}`, href: `#/s/${enc(id)}` };
+}
+
+// Shared collection: via a share link (works without an account) or the Community directory.
+async function renderShared(src, params, alive) {
   renderTopbar('community');
-  const data = await api(`/shared/${enc(token)}`);
+  const data = await api(src.api);
   if (!alive()) return;
   let query = params.get('q') || '';
   state.tab = 'All';
@@ -849,13 +876,13 @@ async function renderShared(token, params, alive) {
   const paint = () => {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     const entries = data.entries.filter((e) => {
-      const hay = [e.name, e.category, e.notes, ...e.tags, ...e.ingredients].join(' ').toLowerCase();
+      const hay = [e.name, e.category, ...e.tags, ...e.ingredients].join(' ').toLowerCase();
       return terms.every((t) => hay.includes(t));
     });
     app.querySelector('#subtitle').textContent = query ? `${entries.length} of ${data.entries.length} entries match “${query}”` : `${data.entries.length} entries`;
     paintCollection({
       tabsEl: app.querySelector('#tabs'), resultsEl: app.querySelector('#results'), entries,
-      hrefFor: (e) => `#/s/${enc(token)}/${e.id}`,
+      hrefFor: (e) => `${src.href}/${e.id}`,
       emptyHtml: `<div class="empty"><div class="big">🍽️</div><p>${query ? 'Nothing matches that search.' : 'Nothing here yet.'}</p></div>`,
     });
   };
@@ -863,9 +890,9 @@ async function renderShared(token, params, alive) {
   paint();
 }
 
-async function renderSharedEntry(token, id, alive) {
+async function renderSharedEntry(src, id, alive) {
   renderTopbar('community');
-  const { owner, entry, isOwner } = await api(`/shared/${enc(token)}/entries/${enc(id)}`);
+  const { owner, entry, isOwner } = await api(`${src.api}/entries/${enc(id)}`);
   if (!alive()) return;
   const actions = isOwner
     ? `<a class="btn" href="#/entry/${entry.id}/edit">✎ Edit</a>`
@@ -873,15 +900,15 @@ async function renderSharedEntry(token, id, alive) {
       ? '<button class="btn-primary" id="save-copy">＋ Save to my kitchen</button>'
       : '<a class="btn btn-primary" href="#/login" id="signin-save">Sign in to save a copy</a>';
   app.innerHTML = entryDetailHtml(entry, {
-    back: { href: `#/s/${enc(token)}`, label: `${owner.username}'s kitchen` },
+    back: { href: src.href, label: `${owner.username}'s kitchen` },
     actions,
-    tagHref: (t) => `#/s/${enc(token)}?q=${enc(t)}`,
+    tagHref: (t) => `${src.href}?q=${enc(t)}`,
   });
   wireGallery();
   app.querySelector('#signin-save')?.addEventListener('click', () => { state.afterLogin = location.hash; });
   app.querySelector('#save-copy')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
     try {
-      const { id: newId } = await api(`/shared/${enc(token)}/entries/${entry.id}/save`, { method: 'POST' });
+      const { id: newId } = await api(`${src.api}/entries/${entry.id}/save`, { method: 'POST' });
       toast(`Saved “${entry.name}” to your kitchen`);
       location.hash = `#/entry/${newId}`;
     } catch (err) { toast(err.message, 'error'); }
@@ -1216,9 +1243,9 @@ async function renderSpotlight(week, alive) {
     app.innerHTML = `<div class="stack">
       <div><h1>🌟 Spotlight</h1><p class="muted">Week of ${esc(data.label)}</p></div>
       <div class="empty"><div class="big">🌱</div><h2>No spotlight yet</h2>
-        <p>Each week, one recipe is picked from the kitchens that have sharing turned on, and everyone can cook along.<br>
-        Nobody is sharing yet, so there's nothing to pick from.</p>
-        <p><a class="btn btn-primary" href="#/community">Turn on sharing for your kitchen</a></p></div>
+        <p>Each week, one recipe is picked from the kitchens that have sharing on and have opted in to the Spotlight, and everyone can cook along.<br>
+        Nobody has opted in yet, so there's nothing to pick from.</p>
+        <p><a class="btn btn-primary" href="#/community">Opt in to the Spotlight</a></p></div>
       ${archiveHtml}
     </div>`;
     return;

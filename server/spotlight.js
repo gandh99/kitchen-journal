@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { db } from './db.js';
 import { requireAuth } from './auth.js';
-import { fail, withPhotos, coverOf, createEntryCopy, duplicatePhotoFile, photoUrl } from './entries.js';
+import { fail, withPhotos, coverOf, createEntryCopy, duplicatePhotoFile, photoUrl, removePhotoFile } from './entries.js';
 
 const WEEK_RE = /^\d{4}-W\d{2}$/;
 
@@ -36,6 +36,48 @@ export function weekLabel(week) {
     : `${fmt(start, { day: 'numeric', month: 'short' })} – ${fmt(end, { day: 'numeric', month: 'short', year: 'numeric' })}`;
 }
 
+// ---------------------------------------------------------------- eligibility & cleanup
+// An owner is eligible while they have sharing on AND have opted in to the Spotlight.
+const ELIGIBLE_OWNER = 'u.share_enabled = 1 AND u.spotlight_opt_in = 1';
+
+function deleteSpotlightRows(rows) {
+  if (!rows.length) return 0;
+  const del = db.prepare('DELETE FROM spotlights WHERE week = ?'); // cook-along submissions cascade
+  for (const r of rows) {
+    del.run(r.week);
+    let photos = [];
+    try { photos = JSON.parse(r.snapshot).photos || []; } catch { /* ignore */ }
+    for (const url of photos) {
+      const name = path.basename(String(url));
+      if (name.startsWith('spot-')) removePhotoFile(name);
+    }
+  }
+  return rows.length;
+}
+
+/** Remove every snapshot (and its spot-* photo copies) of a user's recipes. */
+export function deleteSpotlightsForUser(userId) {
+  return deleteSpotlightRows(db.prepare('SELECT week, snapshot FROM spotlights WHERE user_id = ?').all(userId));
+}
+
+/** Remove snapshots (and spot-* photo copies) of one entry. Call before deleting the entry. */
+export function deleteSpotlightsForEntry(entryId) {
+  return deleteSpotlightRows(db.prepare('SELECT week, snapshot FROM spotlights WHERE entry_id = ?').all(entryId));
+}
+
+/** Drop snapshots whose owner is gone, stopped sharing or never opted in. Runs on every read. */
+function purgeIneligibleSpotlights() {
+  return deleteSpotlightRows(db.prepare(`SELECT s.week, s.snapshot FROM spotlights s
+    LEFT JOIN users u ON u.id = s.user_id
+    WHERE u.id IS NULL OR NOT (${ELIGIBLE_OWNER})`).all());
+}
+
+/** True if `filename` is a spot-* photo copy belonging to a live snapshot. */
+export function isLiveSpotlightFile(filename) {
+  return !!db.prepare(`SELECT 1 FROM spotlights s JOIN users u ON u.id = s.user_id
+    WHERE ${ELIGIBLE_OWNER} AND instr(s.snapshot, ?) > 0 LIMIT 1`).get(`/uploads/${filename}"`);
+}
+
 // ---------------------------------------------------------------- picking the featured entry
 function hash(s) {
   let h = 2166136261;
@@ -44,7 +86,7 @@ function hash(s) {
 }
 
 /**
- * Choose this week's entry from collections whose owners turned sharing on.
+ * Choose this week's entry from collections whose owners turned sharing on and opted in to the Spotlight.
  * Prefers complete entries (photo, ingredients, method), never repeats an entry or
  * recipe name, and avoids featuring the same cook two weeks running.
  */
@@ -55,7 +97,7 @@ function pickEntry(week) {
   const rows = db.prepare(`
     SELECT e.*, (SELECT COUNT(*) FROM photos p WHERE p.entry_id = e.id) AS nphotos
     FROM entries e JOIN users u ON u.id = e.user_id
-    WHERE u.share_enabled = 1
+    WHERE ${ELIGIBLE_OWNER}
       AND e.status = 'made'
       AND e.id NOT IN (SELECT entry_id FROM spotlights WHERE entry_id IS NOT NULL)`).all()
     .filter((r) => !usedNames.has(r.name.toLowerCase().trim()));
@@ -87,6 +129,7 @@ function createSpotlight(week) {
 }
 
 function getSpotlight(week, { create = false } = {}) {
+  purgeIneligibleSpotlights();
   const row = db.prepare('SELECT * FROM spotlights WHERE week = ?').get(week);
   if (row || !create) return row || null;
   return createSpotlight(week);

@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -80,6 +81,19 @@ const entryCols = new Set(db.prepare('PRAGMA table_info(entries)').all().map((c)
 if (!entryCols.has('favorite')) db.exec('ALTER TABLE entries ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0');
 // 'made' = cooked it; 'wishlist' = want to try
 if (!entryCols.has('status')) db.exec("ALTER TABLE entries ADD COLUMN status TEXT NOT NULL DEFAULT 'made'");
+
+const userCols = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+// Public identifier for the Community directory. Unlike share_token it is not a
+// capability: it only works for signed-in users and only while sharing is on.
+if (!userCols.has('public_id')) db.exec('ALTER TABLE users ADD COLUMN public_id TEXT');
+// Weekly Spotlight is opt-in (on top of sharing); off by default.
+if (!userCols.has('spotlight_opt_in')) db.exec('ALTER TABLE users ADD COLUMN spotlight_opt_in INTEGER NOT NULL DEFAULT 0');
+export const newPublicId = () => crypto.randomBytes(9).toString('base64url');
+{
+  const setId = db.prepare('UPDATE users SET public_id = ? WHERE id = ?');
+  for (const u of db.prepare('SELECT id FROM users WHERE public_id IS NULL').all()) setId.run(newPublicId(), u.id);
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_public_id ON users(public_id)');
 
 // Clear out expired sessions on boot.
 db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());

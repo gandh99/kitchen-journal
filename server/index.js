@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { db, UPLOAD_DIR } from './db.js';
+import { db, UPLOAD_DIR, newPublicId } from './db.js';
 import {
   hashPassword, verifyPassword, createSession, destroySession, loadUser, requireAuth,
   loginBlocked, recordLoginFailure, clearLoginFailures,
@@ -17,7 +17,9 @@ import {
   fail, photoUrl, photosFor, toEntry, withPhotos, removePhotoFile, createEntryCopy, cleanEntry, insertEntry,
 } from './entries.js';
 import { registerMarkdownRoutes } from './markdownRoutes.js';
-import { registerSpotlightRoutes, entrySpotlightInfo } from './spotlight.js';
+import {
+  registerSpotlightRoutes, entrySpotlightInfo, deleteSpotlightsForUser, deleteSpotlightsForEntry, isLiveSpotlightFile,
+} from './spotlight.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -73,8 +75,8 @@ app.post('/api/auth/register', h(async (req, res) => {
   if (!/^[a-zA-Z0-9_.-]{3,30}$/.test(username)) throw fail(400, 'Username must be 3–30 characters: letters, numbers, . _ or -');
   if (password.length < 8) throw fail(400, 'Password must be at least 8 characters.');
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw fail(409, 'That username is taken.');
-  const { lastInsertRowid } = db.prepare('INSERT INTO users (username, password_hash) VALUES (?, ?)')
-    .run(username, hashPassword(password));
+  const { lastInsertRowid } = db.prepare('INSERT INTO users (username, password_hash, public_id) VALUES (?, ?, ?)')
+    .run(username, hashPassword(password), newPublicId());
   createSession(res, Number(lastInsertRowid), req);
   res.status(201).json({ user: { id: Number(lastInsertRowid), username } });
 }));
@@ -142,6 +144,7 @@ app.put('/api/entries/:id', requireAuth, (req, res) => {
 app.delete('/api/entries/:id', requireAuth, (req, res) => {
   const existing = getOwnedEntry(req.user.id, req.params.id);
   const files = db.prepare('SELECT filename FROM photos WHERE entry_id = ?').all(existing.id);
+  deleteSpotlightsForEntry(existing.id); // before the delete: spotlights.entry_id is ON DELETE SET NULL
   db.prepare('DELETE FROM entries WHERE id = ?').run(existing.id);
   files.forEach((f) => removePhotoFile(f.filename));
   res.status(204).end();
@@ -220,17 +223,23 @@ app.post('/api/suggest', requireAuth, h(async (req, res) => {
 
 // ============================================================ sharing / social
 function shareInfo(userId) {
-  const u = db.prepare('SELECT share_enabled, share_token FROM users WHERE id = ?').get(userId);
-  return { enabled: !!u.share_enabled, token: u.share_enabled ? u.share_token : null };
+  const u = db.prepare('SELECT share_enabled, share_token, spotlight_opt_in FROM users WHERE id = ?').get(userId);
+  return { enabled: !!u.share_enabled, token: u.share_enabled ? u.share_token : null, spotlight: !!(u.share_enabled && u.spotlight_opt_in) };
 }
 
 app.get('/api/share', requireAuth, (req, res) => res.json(shareInfo(req.user.id)));
 
+// Body: {enabled, regenerate?, spotlight?}. Turning sharing on always issues a fresh token, so
+// links handed out before it was last turned off stay dead.
 app.post('/api/share', requireAuth, (req, res) => {
   const enabled = !!req.body.enabled;
-  const u = db.prepare('SELECT share_token FROM users WHERE id = ?').get(req.user.id);
-  const token = (req.body.regenerate || !u.share_token) ? crypto.randomBytes(12).toString('base64url') : u.share_token;
-  db.prepare('UPDATE users SET share_enabled = ?, share_token = ? WHERE id = ?').run(enabled ? 1 : 0, token, req.user.id);
+  const u = db.prepare('SELECT share_enabled, share_token, spotlight_opt_in FROM users WHERE id = ?').get(req.user.id);
+  const rotate = enabled && (!u.share_enabled || req.body.regenerate || !u.share_token);
+  const token = rotate ? crypto.randomBytes(12).toString('base64url') : u.share_token;
+  const spotlight = enabled && (typeof req.body.spotlight === 'boolean' ? req.body.spotlight : !!u.spotlight_opt_in);
+  db.prepare('UPDATE users SET share_enabled = ?, share_token = ?, spotlight_opt_in = ? WHERE id = ?')
+    .run(enabled ? 1 : 0, token, spotlight ? 1 : 0, req.user.id);
+  if (!spotlight) deleteSpotlightsForUser(req.user.id); // also covers sharing turned off
   res.json(shareInfo(req.user.id));
 });
 
@@ -240,30 +249,65 @@ function sharedOwner(token) {
   return owner;
 }
 
-// Public: anyone with the link can view, no account needed.
-app.get('/api/shared/:token', (req, res) => {
-  const owner = sharedOwner(req.params.token);
-  const rows = db.prepare('SELECT * FROM entries WHERE user_id = ? ORDER BY updated_at DESC, id DESC').all(owner.id);
-  res.json({ owner: { username: owner.username }, entries: withPhotos(rows), isOwner: req.user?.id === owner.id });
-});
+function communityOwner(publicId) {
+  const owner = db.prepare('SELECT id, username FROM users WHERE public_id = ? AND share_enabled = 1').get(String(publicId));
+  if (!owner) throw fail(404, "This kitchen isn't shared any more.");
+  return owner;
+}
 
-app.get('/api/shared/:token/entries/:id', (req, res) => {
-  const owner = sharedOwner(req.params.token);
-  const row = db.prepare('SELECT * FROM entries WHERE id = ? AND user_id = ?').get(Number(req.params.id), owner.id);
+// What other people may see of a shared entry: no personal notes, favourite flags or wishlist items.
+const PUBLIC_COLS = 'id, name, category, recipe_url, image_url, ingredients, instructions, tags, made_on, created_at, updated_at';
+function toPublicEntry(row, photos = []) {
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    recipeUrl: row.recipe_url || '',
+    imageUrl: row.image_url || '',
+    ingredients: JSON.parse(row.ingredients),
+    instructions: row.instructions,
+    tags: JSON.parse(row.tags),
+    madeOn: row.made_on || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    photos,
+  };
+}
+function publicEntries(rows) {
+  const map = photosFor(rows.map((r) => r.id));
+  return rows.map((r) => toPublicEntry(r, map.get(r.id)));
+}
+const publicEntryRow = (ownerId, id) => db.prepare(`SELECT ${PUBLIC_COLS} FROM entries
+  WHERE id = ? AND user_id = ? AND status = 'made'`).get(Number(id), ownerId);
+
+function sharedCollection(owner, req, res) {
+  const rows = db.prepare(`SELECT ${PUBLIC_COLS} FROM entries WHERE user_id = ? AND status = 'made'
+    ORDER BY updated_at DESC, id DESC`).all(owner.id);
+  res.json({ owner: { username: owner.username }, entries: publicEntries(rows), isOwner: req.user?.id === owner.id });
+}
+function sharedEntry(owner, req, res) {
+  const row = publicEntryRow(owner.id, req.params.id);
   if (!row) throw fail(404, 'Entry not found.');
-  res.json({ owner: { username: owner.username }, entry: withPhotos([row])[0], isOwner: req.user?.id === owner.id });
-});
-
-// Copy someone's shared entry (including photos) into your own collection.
-app.post('/api/shared/:token/entries/:id/save', requireAuth, (req, res) => {
-  const owner = sharedOwner(req.params.token);
-  const src = db.prepare('SELECT * FROM entries WHERE id = ? AND user_id = ?').get(Number(req.params.id), owner.id);
+  res.json({ owner: { username: owner.username }, entry: publicEntries([row])[0], isOwner: req.user?.id === owner.id });
+}
+// Copy someone's shared entry (including photos, but not their notes) into your own collection.
+function saveSharedEntry(owner, req, res) {
+  const src = publicEntryRow(owner.id, req.params.id);
   if (!src) throw fail(404, 'Entry not found.');
-  const note = `Saved from ${owner.username}'s kitchen.` + (src.notes ? `\n\n${src.notes}` : '');
   const files = db.prepare('SELECT filename FROM photos WHERE entry_id = ? ORDER BY id').all(src.id).map((p) => p.filename);
-  const id = createEntryCopy(req.user.id, toEntry(src), { notes: note, photoFiles: files });
+  const id = createEntryCopy(req.user.id, toPublicEntry(src), { notes: `Saved from ${owner.username}'s kitchen.`, photoFiles: files });
   res.status(201).json({ id });
-});
+}
+
+// Share-by-link: anyone with the link can view, no account needed.
+app.get('/api/shared/:token', (req, res) => sharedCollection(sharedOwner(req.params.token), req, res));
+app.get('/api/shared/:token/entries/:id', (req, res) => sharedEntry(sharedOwner(req.params.token), req, res));
+app.post('/api/shared/:token/entries/:id/save', requireAuth, (req, res) => saveSharedEntry(sharedOwner(req.params.token), req, res));
+
+// Community directory: signed-in users browse shared kitchens by public id (never the link token).
+app.get('/api/community/:publicId', requireAuth, (req, res) => sharedCollection(communityOwner(req.params.publicId), req, res));
+app.get('/api/community/:publicId/entries/:id', requireAuth, (req, res) => sharedEntry(communityOwner(req.params.publicId), req, res));
+app.post('/api/community/:publicId/entries/:id/save', requireAuth, (req, res) => saveSharedEntry(communityOwner(req.params.publicId), req, res));
 
 registerSpotlightRoutes(app);
 registerMarkdownRoutes(app);
@@ -271,13 +315,13 @@ registerMarkdownRoutes(app);
 // Logged-in users can browse everyone who has turned sharing on.
 app.get('/api/community', requireAuth, (req, res) => {
   const users = db.prepare(`
-    SELECT u.id, u.username, u.share_token AS token, COUNT(e.id) AS count, MAX(e.updated_at) AS lastUpdated
-    FROM users u LEFT JOIN entries e ON e.user_id = u.id
+    SELECT u.id, u.username, u.public_id AS publicId, COUNT(e.id) AS count, MAX(e.updated_at) AS lastUpdated
+    FROM users u LEFT JOIN entries e ON e.user_id = u.id AND e.status = 'made'
     WHERE u.share_enabled = 1
     GROUP BY u.id ORDER BY lastUpdated DESC NULLS LAST`).all();
   const coverStmt = db.prepare(`
     SELECT e.image_url, (SELECT filename FROM photos p WHERE p.entry_id = e.id ORDER BY p.id LIMIT 1) AS photo, e.tags
-    FROM entries e WHERE e.user_id = ? ORDER BY e.updated_at DESC LIMIT 4`);
+    FROM entries e WHERE e.user_id = ? AND e.status = 'made' ORDER BY e.updated_at DESC LIMIT 4`);
   res.json({
     collections: users.map((u) => {
       const recent = coverStmt.all(u.id);
@@ -285,13 +329,33 @@ app.get('/api/community', requireAuth, (req, res) => {
       const tagCount = {};
       recent.forEach((r) => JSON.parse(r.tags).forEach((t) => { tagCount[t] = (tagCount[t] || 0) + 1; }));
       const topTags = Object.entries(tagCount).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([t]) => t);
-      return { username: u.username, token: u.token, count: u.count, covers, topTags, isMe: u.id === req.user.id };
+      return { username: u.username, publicId: u.publicId, count: u.count, covers, topTags, isMe: u.id === req.user.id };
     }),
   });
 });
 
 // ============================================================ static + errors
-app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '7d', immutable: true }));
+// Uploaded photos are only served to people allowed to see them: the owner; anyone while the
+// owner shares the (non-wishlist) entry; signed-in users for cook-along submissions; and
+// signed-in users for spot-* copies belonging to a live Spotlight.
+function canSeeUpload(filename, user) {
+  if (filename.startsWith('spot-')) return !!user && isLiveSpotlightFile(filename);
+  const p = db.prepare(`SELECT e.user_id, e.status, u.share_enabled,
+      EXISTS (SELECT 1 FROM spotlight_submissions ss WHERE ss.entry_id = e.id) AS submitted
+    FROM photos p JOIN entries e ON e.id = p.entry_id JOIN users u ON u.id = e.user_id
+    WHERE p.filename = ? LIMIT 1`).get(filename);
+  if (!p) return false;
+  return (!!user && p.user_id === user.id) || (!!p.share_enabled && p.status === 'made') || (!!user && !!p.submitted);
+}
+app.use('/uploads', (req, res, next) => {
+  let name;
+  try { name = path.basename(decodeURIComponent(req.path)); } catch { return res.status(404).end(); }
+  if (!name || !canSeeUpload(name, req.user)) return res.status(404).end();
+  next();
+}, express.static(UPLOAD_DIR, {
+  // Private + short-lived so revoked photos don't linger in shared caches.
+  setHeaders: (res) => res.set('Cache-Control', 'private, max-age=3600'),
+}));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }));
 
